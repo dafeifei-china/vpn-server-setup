@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -15,8 +16,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
+
+import store
 
 MANAGER_DIR = Path(__file__).resolve().parent
 ROOT = MANAGER_DIR.parent
@@ -357,35 +361,56 @@ def _stop_conflicts(d, stop_peers=True):
     return stopped
 
 
-def _result(key, action, r, stopped=None):
+def _default_actor():
+    try:
+        return os.environ.get("SUDO_USER") or getpass.getuser()
+    except Exception:
+        return "unknown"
+
+
+def _result(key, action, r, stopped=None, duration_ms=None, actor=None, source="cli"):
     res = {"key": key, "action": action, "stopped_peers": stopped or [],
            "ok": r.returncode == 0, "message": (r.stderr or r.stdout).strip()}
     if not res["ok"] and VPN_BY_KEY[key]["kind"] == "systemd" and os.geteuid() != 0:
         res["hint"] = ("宿主机 systemd 服务需要 root：请执行一次 "
                        "`sudo ./install-sudoers.sh` 授权，或以 root 运行面板。")
+    try:
+        store.record_audit(action=action, key=key, ok=res["ok"],
+                           actor=actor or _default_actor(), source=source,
+                           stopped_peers=stopped, duration_ms=duration_ms,
+                           message=res.get("message"))
+    except Exception:
+        pass
     return res
 
 
-def up(key, stop_peers=True):
+def up(key, stop_peers=True, actor=None, source="cli"):
     d = VPN_BY_KEY[key]
+    t0 = time.time()
     stopped = _stop_conflicts(d, stop_peers)
-    return _result(key, "up", start_vpn(d), stopped)
+    return _result(key, "up", start_vpn(d), stopped,
+                   int((time.time() - t0) * 1000), actor, source)
 
 
-def down(key):
+def down(key, actor=None, source="cli"):
     d = VPN_BY_KEY[key]
-    return _result(key, "down", stop_vpn(d))
+    t0 = time.time()
+    return _result(key, "down", stop_vpn(d),
+                   duration_ms=int((time.time() - t0) * 1000), actor=actor, source=source)
 
 
-def restart(key, stop_peers=True):
+def restart(key, stop_peers=True, actor=None, source="cli"):
     d = VPN_BY_KEY[key]
+    t0 = time.time()
     stopped = _stop_conflicts(d, stop_peers)
-    return _result(key, "restart", restart_vpn(d), stopped)
+    return _result(key, "restart", restart_vpn(d), stopped,
+                   int((time.time() - t0) * 1000), actor, source)
 
 
-def enable(key, stop_peers=True):
+def enable(key, stop_peers=True, actor=None, source="cli"):
     """Start and restore autostart (docker --restart=unless-stopped / systemctl enable)."""
     d = VPN_BY_KEY[key]
+    t0 = time.time()
     stopped = _stop_conflicts(d, stop_peers)
     if d["kind"] == "docker":
         docker(["update", "--restart=unless-stopped", d["target"]])
@@ -395,12 +420,14 @@ def enable(key, stop_peers=True):
         re = systemctl(["enable", d["target"]])
         rs = systemctl(["start", d["target"]])
         r = re if re.returncode != 0 else rs
-    return _result(key, "enable", r, stopped)
+    return _result(key, "enable", r, stopped,
+                   int((time.time() - t0) * 1000), actor, source)
 
 
-def disable(key):
+def disable(key, actor=None, source="cli"):
     """Stop and turn off autostart (docker --restart=no / systemctl disable)."""
     d = VPN_BY_KEY[key]
+    t0 = time.time()
     if d["kind"] == "docker":
         r = stop_vpn(d)
         docker(["update", "--restart=no", d["target"]])
@@ -409,7 +436,8 @@ def disable(key):
         rs = systemctl(["stop", d["target"]])
         rd = systemctl(["disable", d["target"]])
         r = rs if rs.returncode != 0 else rd
-    return _result(key, "disable", r)
+    return _result(key, "disable", r,
+                   duration_ms=int((time.time() - t0) * 1000), actor=actor, source=source)
 
 
 def _journalctl(unit, tail, timeout=60):
@@ -575,6 +603,57 @@ def cmd_info(args):
     return 0
 
 
+def _fmt_ts(ts):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def cmd_events(args):
+    rows = store.recent_events(args.name, args.tail)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print("（无连接事件记录）")
+        return 0
+    for r in rows:
+        print(f"{_fmt_ts(r['ts'])}  {r['key']:<12} [{r['source']:<7}] {r['line']}")
+    return 0
+
+
+def cmd_audit(args):
+    rows = store.recent_audit(args.tail)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print("（无审计记录）")
+        return 0
+    for r in rows:
+        tag = "OK" if r["ok"] else "FAIL"
+        extra = ""
+        if r["stopped_peers"]:
+            extra += " stopped=" + r["stopped_peers"]
+        if r["duration_ms"] is not None:
+            extra += f" {r['duration_ms']}ms"
+        print(f"{_fmt_ts(r['ts'])}  {tag:<4} {r['action']:<8} "
+              f"{(r['key'] or '-'):<12} {(r['actor'] or '-'):<16} "
+              f"({r['source']}){extra}")
+        if not r["ok"] and r["message"]:
+            print("        " + r["message"].splitlines()[0])
+    return 0
+
+
+def cmd_collect(args):
+    import collector
+    return collector.main(args.keys)
+
+
+def cmd_prune(args):
+    n = store.prune(events_days=args.events_days, audit_days=args.audit_days)
+    print(f"已清理 {n} 条过期记录")
+    return 0
+
+
 def cmd_ip(args):
     print(server_ip())
     return 0
@@ -640,6 +719,26 @@ def build_parser():
     sp = sub.add_parser("doctor", help="自检：docker/冲突/证书/端口")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("events", help="查看持久化的连接事件（默认全部协议）")
+    sp.add_argument("name", nargs="?", choices=list(VPN_BY_KEY), help="只看某个协议")
+    sp.add_argument("--tail", type=int, default=50)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_events)
+
+    sp = sub.add_parser("audit", help="查看管理操作审计（谁在何时做了什么）")
+    sp.add_argument("--tail", type=int, default=50)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_audit)
+
+    sp = sub.add_parser("collect", help="前台运行日志采集器（落库 + JSONL 留档）")
+    sp.add_argument("keys", nargs="*", help="只采集指定协议 key（默认全部）")
+    sp.set_defaults(func=cmd_collect)
+
+    sp = sub.add_parser("prune", help="清理过期的连接事件/审计记录")
+    sp.add_argument("--events-days", type=int, default=30)
+    sp.add_argument("--audit-days", type=int, default=180)
+    sp.set_defaults(func=cmd_prune)
     return p
 
 

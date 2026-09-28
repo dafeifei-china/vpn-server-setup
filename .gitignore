@@ -39,3 +39,6 @@ __pycache__/
 *.7z
 *.log
 .DS_Store
+
+# 运行态数据：SQLite 事件库/审计、日志采集器 JSONL、锁文件（含运行信息）
+state/

@@ -49,6 +49,17 @@ cd manager
 
 > **协议清单（唯一事实源）**：每种 VPN 的元数据（端口/网段/探针/互斥组/文档/日志关键词/客户端证据命令）都在仓库根 `config/protocols/<key>.toml`。`vpnctl.py` 启动时用标准库 `tomllib` 加载，CLI 与网页面板都由它派生；新增或调整 VPN 改 TOML 即可，无需改 Python。
 
+### 连接事件与管理审计（持久化）
+
+- `./vpnctl events [<key>] [--tail N] [--json]`：查看采集到的客户端连接/断开事件（可检索）。
+- `./vpnctl audit [--tail N] [--json]`：查看管理操作审计（谁、何时、做了什么、耗时、结果）。
+- `./vpnctl collect [<key>...]`：前台运行日志采集器（网页面板默认已内置，无需单独启动）。
+- `./vpnctl prune [--events-days N] [--audit-days N]`：清理过期记录（默认事件 30 天 / 审计 180 天）。
+
+数据在仓库根 `state/`（已 `.gitignore`）：`state/vpnplat.db`（SQLite：`events` + `audit`），
+`state/logs/<key>.jsonl`（全部原始日志，5MB×3 轮转）。面板接口 `/api/events`、`/api/audit` 提供同样数据；
+每次启停/重启/启用禁用都会以 `actor`（CLI 用户名或网页面板来源 IP）与 `source`（cli/web）写入审计。
+
 **互斥逻辑**：`strongswan` / `l2tp-ipsec` / `vpnc` 同属 `ipsec500` 组（抢 500,4500/udp）。
 `up` 默认先停同组其它服务；想强制共存（一般不这样）加 `--keep-conflicts`。
 

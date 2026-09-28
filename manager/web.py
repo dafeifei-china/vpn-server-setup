@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import select
+import signal
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -822,6 +823,17 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query)
             tail = int((q.get("tail") or ["80"])[0])
             return self._stream_logs(name, tail)
+        if u.path == "/api/events":
+            q = parse_qs(u.query)
+            name = (q.get("name") or [""])[0] or None
+            if name and name not in vpnctl.VPN_BY_KEY:
+                return self._json(400, {"error": "unknown vpn"})
+            tail = int((q.get("tail") or ["50"])[0])
+            return self._json(200, vpnctl.store.recent_events(name, tail))
+        if u.path == "/api/audit":
+            q = parse_qs(u.query)
+            tail = int((q.get("tail") or ["50"])[0])
+            return self._json(200, vpnctl.store.recent_audit(tail))
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -845,10 +857,12 @@ class Handler(BaseHTTPRequestHandler):
         if action not in ("up", "down", "restart", "enable", "disable"):
             return self._json(400, {"error": "unknown action: " + str(action)})
         try:
+            actor = self.client_address[0]
             if action in ("up", "restart", "enable"):
-                res = getattr(vpnctl, action)(name, stop_peers=not keep)
+                res = getattr(vpnctl, action)(name, stop_peers=not keep,
+                                               actor=actor, source="web")
             else:
-                res = getattr(vpnctl, action)(name)
+                res = getattr(vpnctl, action)(name, actor=actor, source="web")
         except Exception as e:
             return self._json(500, {"error": str(e)})
         return self._json(200 if res["ok"] else 500, res)
@@ -863,20 +877,37 @@ def main():
     p.add_argument("--auth", action="store_true", help="要求操作令牌（默认不要求，打开即可用）")
     p.add_argument("--no-auth", action="store_true", help="兼容旧参数，默认即无需令牌")
     p.add_argument("--token", help="指定操作令牌（配合 --auth 使用）")
+    p.add_argument("--no-collect", action="store_true",
+                   help="不启动后台日志采集器（默认启动：连接事件落库）")
     args = p.parse_args()
     READ_ONLY = args.read_only
     REQUIRE_TOKEN = args.auth and not args.no_auth
     TOKEN = (args.token or load_token()) if REQUIRE_TOKEN else ""
 
+    collector_status = "未启动"
+    if not args.no_collect:
+        try:
+            import collector
+            _lock = collector.acquire_lock()
+            if _lock is None:
+                collector_status = "已有采集器在运行，跳过"
+            else:
+                collector.LogCollector().start()
+                collector_status = "已启动（连接事件落库 state/vpnplat.db）"
+        except Exception as e:  # 采集器失败不应阻断面板
+            collector_status = f"启动失败：{e}"
+
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print("=" * 56)
     print(f"  VPN 管控平台  http://{args.host}:{args.port}")
+    print(f"  日志采集器: {collector_status}")
     print(f"  只读模式: {'是' if READ_ONLY else '否'}   令牌校验: {'开' if REQUIRE_TOKEN else '关（打开即可用）'}")
     if REQUIRE_TOKEN:
         print(f"  操作令牌: {TOKEN}")
         print(f"  （已保存到 {TOKEN_FILE}，在页面右上角填入后即可启停）")
     print("  远程访问建议: ssh -L %d:127.0.0.1:%d <user>@<server>" % (args.port, args.port))
     print("=" * 56)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
