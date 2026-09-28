@@ -1,0 +1,41 @@
+# =====================================================================
+# 机密（绝不入库；完整备份见 tools/backup.sh）
+# 本工作区把所有 VPN 的 PKI/私钥/凭据都放在树内，必须在此排除，
+# 否则 git init 后私钥会进入版本历史。
+# =====================================================================
+
+# 私钥与密钥容器
+*.key
+*.p12
+*.pfx
+*.pem
+
+# 凭据 / 口令 / 令牌 / 环境文件
+*.env
+*secrets*
+*.token
+
+# 含内嵌私钥的客户端配置与打包产物
+*.ovpn
+openvpn/client.conf
+openvpn/client-nopass.conf
+openvpn/local-server/clients/
+openvpn/local-server/etc/openvpn/easy-rsa/pki/inline/
+可用VPN/可用VPN/wh-vpn-linux-tcp.conf
+
+# EasyRSA / strongSwan PKI（私钥目录）
+**/easy-rsa/pki/private/
+**/pki/**/private/
+Strongswan/pki/
+
+# 运行期生成
+manager/.token
+
+# =====================================================================
+# 运行时 / 构建产物
+# =====================================================================
+__pycache__/
+*.py[cod]
+*.7z
+*.log
+.DS_Store

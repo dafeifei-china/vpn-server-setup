@@ -1,0 +1,24 @@
+# OpenConnect（证书认证）NetworkManager 连接文件
+# 用法：拷到 /etc/NetworkManager/system-connections/ 后 `nmcli connection reload`
+# 证书路径按客户端实际目录改；登录名 = client.crt 的 CN
+# [vpn-secrets] 的 cookie/gateway/gwcert 由密钥代理在首次连接后自动写入，无需手填
+[connection]
+id=OpenConnect
+uuid=39dd4c90-c272-46a0-b98b-93e011fe06ee
+type=vpn
+permissions=
+
+[vpn]
+service-type=org.freedesktop.NetworkManager.openconnect
+gateway=10.20.8.90:8443
+cacert=/home/xiong/Desktop/OpenConnect-cert/ca.crt
+usercert=/home/xiong/Desktop/OpenConnect-cert/client.crt
+userkey=/home/xiong/Desktop/OpenConnect-cert/client.key
+user-name=test
+
+[ipv4]
+method=auto
+
+[ipv6]
+addr-gen-mode=eui64
+method=auto

@@ -1,0 +1,14 @@
+首先：添加系统代理 https://it.uniontech.com/proxy/proxy.pac
+
+:vpn-l2tp环境搭建::
+1.修改intall_docker.sh:将sudo usermod -aG docker xxx 改为 sudo usermod -aG docker xionglinhui
+2.运行intall_docker.sh,安装docker
+3.进入vpn-l2tp目录,查看README.md, 按照操作执行
+  如果运行不起来,重启一下vpn-l2tp服务
+4.测试机端:新建L2TP类型的VPN,网关为服务端IP,用户名/密码=test/tes,点击保存后VPN可以连通 (目前只能看连接状态)
+
+
+
+OpenVPN--证书（TSL）
+1.将 Dockerfile文件中的FROM ubuntu:16.10修改为FROM ubuntu:16.04（UOS支持的版本）
+2.根据文档执行

@@ -1,0 +1,18 @@
+[Unit]
+Description=vpnctl 网页面板 (VPN 统一管理)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uos
+Group=uos
+WorkingDirectory=/home/uos/Desktop/VPN服务端搭建/manager
+ExecStart=/usr/bin/python3 -u /home/uos/Desktop/VPN服务端搭建/manager/web.py --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
