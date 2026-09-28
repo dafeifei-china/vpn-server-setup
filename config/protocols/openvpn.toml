@@ -1,0 +1,24 @@
+# OpenVPN (TLS) —— 协议清单一（唯一事实源）
+order = 10
+key = "openvpn"
+title = "OpenVPN (TLS)"
+kind = "docker"
+target = "running-vpn-openvpn-tls"
+ports = ["1194/udp"]
+subnet = "10.99.99.0/24"
+gateway = "10.99.99.1"
+client = "openvpn/local-server/clients/"
+docs = "openvpn/OpenVPN使用指南.md"
+verify = "docker logs --tail 20 running-vpn-openvpn-tls | grep \"Initialization Sequence Completed\""
+note = "证书认证；1194/udp 独享，可与其它任意 VPN 共存。"
+client_hint = "客户端连上后服务端日志出现 `Peer Connection Initiated` 与 `MULTI: primary virtual IP for <client>`；客户端 `ip addr show tun0` 拿到 10.99.99.x。"
+log_events = "Peer Connection Initiated|MULTI: primary virtual IP|Initialization Sequence Completed|AUTH_FAILED|TLS: Initial packet|SIGUSR1|client-instance|client/"
+
+[[probes]]
+proto = "udp"
+port = 1194
+
+[[clients_cmds]]
+label = "最近连接日志"
+kind = "docker"
+cmd = "logs --tail 400 running-vpn-openvpn-tls 2>&1 | grep -E 'Peer Connection Initiated|MULTI: primary virtual IP' | tail -20 || echo '（近期无连接记录）'"

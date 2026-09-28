@@ -47,6 +47,8 @@ cd manager
 
 支持的 key：`openvpn` `l2tp-ipsec` `l2tp-plain` `strongswan` `pptp` `openconnect` `vpnc`
 
+> **协议清单（唯一事实源）**：每种 VPN 的元数据（端口/网段/探针/互斥组/文档/日志关键词/客户端证据命令）都在仓库根 `config/protocols/<key>.toml`。`vpnctl.py` 启动时用标准库 `tomllib` 加载，CLI 与网页面板都由它派生；新增或调整 VPN 改 TOML 即可，无需改 Python。
+
 **互斥逻辑**：`strongswan` / `l2tp-ipsec` / `vpnc` 同属 `ipsec500` 组（抢 500,4500/udp）。
 `up` 默认先停同组其它服务；想强制共存（一般不这样）加 `--keep-conflicts`。
 

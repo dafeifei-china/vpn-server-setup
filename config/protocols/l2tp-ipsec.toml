@@ -1,0 +1,39 @@
+# L2TP/IPsec —— 协议清单
+order = 20
+key = "l2tp-ipsec"
+title = "L2TP/IPsec"
+kind = "docker"
+target = "ipsec-vpn-server"
+ports = ["500/udp", "4500/udp"]
+group = "ipsec500"
+subnet = "192.168.42.0/24"
+gateway = "192.168.42.1"
+client = "L2TP_IPSEC/vpn.env"
+docs = "L2TP_IPSEC/L2TP使用指南.md"
+verify = "docker exec ipsec-vpn-server ipsec status"
+note = "与 strongSwan / VPNC 抢 500,4500/udp，三选一；客户端勿勾选 MPPE。"
+client_hint = "`ipsec status` 出现 ESTABLISHED、`ipsec trafficstatus` 有 `l2tp-psk` 会话；容器内出现 pppX 且地址 192.168.42.x。客户端拿到 192.168.42.x 即连到 L2TP/IPsec（若拿到 192.168.44.x 则是被裸 L2TP 抢答）。"
+log_events = "ESTABLISHED|CHILD_SA|installed|Call established|IP address|Connect: ppp|Connection terminated|Terminating pppd|LCP terminated|CHAP|PAP|ppp0|AUTH|IKE_SA|deleting"
+
+[[probes]]
+proto = "udp"
+port = 500
+
+[[probes]]
+proto = "udp"
+port = 4500
+
+[[clients_cmds]]
+label = "IPsec 状态"
+kind = "docker"
+cmd = "exec ipsec-vpn-server ipsec status 2>&1"
+
+[[clients_cmds]]
+label = "隧道流量"
+kind = "docker"
+cmd = "exec ipsec-vpn-server ipsec trafficstatus 2>&1"
+
+[[clients_cmds]]
+label = "容器内 ppp 接口"
+kind = "docker"
+cmd = "exec ipsec-vpn-server ip -4 addr show 2>&1 | grep -A3 'ppp' || echo '（无 ppp 接口，暂无客户端）'"

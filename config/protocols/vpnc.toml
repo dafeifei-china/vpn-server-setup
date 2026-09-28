@@ -1,0 +1,34 @@
+# VPNC (Cisco IPSec) —— 协议清单
+order = 70
+key = "vpnc"
+title = "VPNC (Cisco IPSec)"
+kind = "docker"
+target = "vpnc-server"
+ports = ["500/udp", "4500/udp"]
+group = "ipsec500"
+subnet = "192.168.47.0/24"
+gateway = "192.168.47.1"
+client = "VPNC/clients/vpnc.conf"
+docs = "VPNC/VPNC使用指南.md"
+verify = "docker exec vpnc-server ipsec statusall | grep cisco-vpnc"
+note = "IKEv1 Aggressive+PSK+XAUTH；与 strongSwan / L2TP/IPsec 三选一。"
+client_hint = "`ipsec statusall` 出现 `cisco-vpnc` 且 Security Associations 不为 0；无 ping 网关，以客户端能否出网为准。客户端 `tun0=192.168.47.x`。"
+log_events = "CHILD_SA|IKE_SA|XAUTH|established|MODE_CFG|MODE_CONFIG|peer"
+
+[[probes]]
+proto = "udp"
+port = 500
+
+[[probes]]
+proto = "udp"
+port = 4500
+
+[[clients_cmds]]
+label = "IPsec 状态 (cisco-vpnc)"
+kind = "docker"
+cmd = "exec vpnc-server ipsec statusall 2>&1 | grep -A8 cisco-vpnc || echo '（未加载 cisco-vpnc 连接）'"
+
+[[clients_cmds]]
+label = "charon 日志"
+kind = "docker"
+cmd = "exec vpnc-server sh -c 'tail -n 30 /var/log/charon.log 2>/dev/null' || echo '（无 charon.log）'"

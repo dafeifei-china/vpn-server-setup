@@ -1,0 +1,30 @@
+# OpenConnect (ocserv) —— 协议清单
+order = 60
+key = "openconnect"
+title = "OpenConnect (ocserv)"
+kind = "docker"
+target = "openconnect-server"
+ports = ["8443/tcp", "8443/udp"]
+subnet = "192.168.46.0/24"
+gateway = "192.168.46.1"
+client = "OpenConnect/etc/ocserv/"
+docs = "OpenConnect/OpenConnect使用指南.md"
+verify = "docker exec openconnect-server occtl show status"
+note = "证书认证；服务器证书绑定 IP；8443 独享，可共存。"
+client_hint = "`occtl show users` 列出已登录用户（取自客户端证书 CN，默认 test）；客户端 `vpn0/tun0=192.168.46.x`。"
+log_events = "login|connect|user|DTLS|session|authenticated|accepted|disconnect"
+cert_check = "OpenConnect/etc/ocserv/server.crt"
+
+[[probes]]
+proto = "tcp"
+port = 8443
+
+[[clients_cmds]]
+label = "在线用户 (occtl show users)"
+kind = "docker"
+cmd = "exec openconnect-server occtl show users 2>&1 || echo '（无在线用户）'"
+
+[[clients_cmds]]
+label = "服务状态 (occtl show status)"
+kind = "docker"
+cmd = "exec openconnect-server occtl show status 2>&1"

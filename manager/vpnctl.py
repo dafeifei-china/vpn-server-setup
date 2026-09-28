@@ -15,142 +15,70 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 MANAGER_DIR = Path(__file__).resolve().parent
 ROOT = MANAGER_DIR.parent
 
-VPN_DEFS = [
-    dict(
-        key="openvpn", title="OpenVPN (TLS)", kind="docker",
-        target="running-vpn-openvpn-tls", ports=["1194/udp"],
-        probes=[("udp", 1194)], group=None,
-        subnet="10.99.99.0/24", gateway="10.99.99.1",
-        client="openvpn/local-server/clients/", docs="openvpn/OpenVPN使用指南.md",
-        verify='docker logs --tail 20 running-vpn-openvpn-tls | grep "Initialization Sequence Completed"',
-        note="证书认证；1194/udp 独享，可与其它任意 VPN 共存。",
-        client_hint="客户端连上后服务端日志出现 `Peer Connection Initiated` 与 `MULTI: primary virtual IP for <client>`；客户端 `ip addr show tun0` 拿到 10.99.99.x。",
-        clients_cmds=[
-            ("最近连接日志", "docker",
-             "logs --tail 400 running-vpn-openvpn-tls 2>&1 | grep -E 'Peer Connection Initiated|MULTI: primary virtual IP' | tail -20 || echo '（近期无连接记录）'"),
-        ],
-    ),
-    dict(
-        key="l2tp-ipsec", title="L2TP/IPsec", kind="docker",
-        target="ipsec-vpn-server", ports=["500/udp", "4500/udp"],
-        probes=[("udp", 500), ("udp", 4500)], group="ipsec500",
-        subnet="192.168.42.0/24", gateway="192.168.42.1",
-        client="L2TP_IPSEC/vpn.env", docs="L2TP_IPSEC/L2TP使用指南.md",
-        verify="docker exec ipsec-vpn-server ipsec status",
-        note="与 strongSwan / VPNC 抢 500,4500/udp，三选一；客户端勿勾选 MPPE。",
-        client_hint="`ipsec status` 出现 ESTABLISHED、`ipsec trafficstatus` 有 `l2tp-psk` 会话；容器内出现 pppX 且地址 192.168.42.x。客户端拿到 192.168.42.x 即连到 L2TP/IPsec（若拿到 192.168.44.x 则是被裸 L2TP 抢答）。",
-        clients_cmds=[
-            ("IPsec 状态", "docker", "exec ipsec-vpn-server ipsec status 2>&1"),
-            ("隧道流量", "docker", "exec ipsec-vpn-server ipsec trafficstatus 2>&1"),
-            ("容器内 ppp 接口", "docker",
-             "exec ipsec-vpn-server ip -4 addr show 2>&1 | grep -A3 'ppp' || echo '（无 ppp 接口，暂无客户端）'"),
-        ],
-    ),
-    dict(
-        key="l2tp-plain", title="L2TP (纯, 无 IPsec)", kind="systemd",
-        target="xl2tpd.service", ports=["1701/udp"],
-        probes=[("udp", 1701)], group=None,
-        subnet="192.168.44.0/24", gateway="192.168.44.1",
-        client="L2TP_PLAIN/", docs="L2TP_PLAIN/L2TP_PLAIN使用指南.md",
-        verify="systemctl status xl2tpd; ss -ulnp | grep 1701",
-        note="宿主机 xl2tpd+pppd（非容器）；1701/udp 与 L2TP/IPsec 内层冲突。",
-        client_hint="宿主机出现 pppX 接口且地址 192.168.44.x（`ip -4 addr show | grep ppp`），`ps -ef | grep pppd` 有进程，`journalctl -u xl2tpd` 有 Call established。客户端拿到 192.168.44.x 即连到裸 L2TP（无 IPsec）。",
-        clients_cmds=[
-            ("xl2tpd 服务", "host", "systemctl status xl2tpd --no-pager 2>&1 | head -12"),
-            ("宿主机 ppp 接口", "host",
-             "ip -4 addr show 2>&1 | grep -A3 'ppp' || echo '（无 ppp 接口，暂无客户端）'"),
-            ("pppd 进程", "host", "ps -ef 2>&1 | grep -E '[p]ppd' || echo '（无客户端进程）'"),
-            ("最近日志", "host", "journalctl -q -u xl2tpd -n 40 --no-pager 2>&1 | tail -25"),
-        ],
-    ),
-    dict(
-        key="strongswan", title="strongSwan (IKEv2)", kind="docker",
-        target="strongswan-server", ports=["500/udp", "4500/udp"],
-        probes=[("udp", 500), ("udp", 4500)], group="ipsec500",
-        subnet="10.10.10.0/24", gateway="10.10.10.1",
-        client="Strongswan/clients/", docs="Strongswan/STRONGSWAN使用指南.md",
-        verify="docker exec strongswan-server ipsec statusall",
-        note="服务器证书绑定 IP；与 L2TP/IPsec / VPNC 三选一。",
-        client_hint="`ipsec statusall` 出现 `ikev2-cert[...]: ESTABLISHED` 并分配 10.10.10.x。strongSwan 是路由型隧道，没有 ppp/tun 接口。",
-        clients_cmds=[
-            ("IKEv2 状态", "docker", "exec strongswan-server ipsec statusall 2>&1"),
-        ],
-    ),
-    dict(
-        key="pptp", title="PPTP", kind="docker",
-        target="pptp-server", ports=["1723/tcp", "GRE/47"],
-        probes=[("tcp", 1723)], group=None,
-        subnet="192.168.45.0/24", gateway="192.168.45.1",
-        client="PPTP/", docs="PPTP/PPTP使用指南.md",
-        verify="ss -tlnp | grep 1723",
-        note="需 --net host --privileged（GRE 协议 47）；可与任意 VPN 共存。",
-        client_hint="容器内出现 pppX 接口与 pppd 进程；客户端 `ppp0=192.168.45.x`。服务端 `docker exec pptp-server ip -4 addr` 可见对端地址。",
-        clients_cmds=[
-            ("pppd 进程", "docker",
-             "exec pptp-server ps -ef 2>&1 | grep -E '[p]ppd|[p]ptpd' || echo '（无客户端进程）'"),
-            ("容器内 ppp 接口", "docker",
-             "exec pptp-server ip -4 addr show 2>&1 | grep -A3 'ppp' || echo '（无 ppp 接口，暂无客户端）'"),
-            ("最近日志", "docker",
-             "logs --tail 80 pptp-server 2>&1 | grep -iE 'pppd|pptpd|connect|peer' | tail -20 || echo '（无相关日志）'"),
-        ],
-    ),
-    dict(
-        key="openconnect", title="OpenConnect (ocserv)", kind="docker",
-        target="openconnect-server", ports=["8443/tcp", "8443/udp"],
-        probes=[("tcp", 8443)], group=None,
-        subnet="192.168.46.0/24", gateway="192.168.46.1",
-        client="OpenConnect/etc/ocserv/", docs="OpenConnect/OpenConnect使用指南.md",
-        verify="docker exec openconnect-server occtl show status",
-        note="证书认证；服务器证书绑定 IP；8443 独享，可共存。",
-        client_hint="`occtl show users` 列出已登录用户（取自客户端证书 CN，默认 test）；客户端 `vpn0/tun0=192.168.46.x`。",
-        clients_cmds=[
-            ("在线用户 (occtl show users)", "docker",
-             "exec openconnect-server occtl show users 2>&1 || echo '（无在线用户）'"),
-            ("服务状态 (occtl show status)", "docker",
-             "exec openconnect-server occtl show status 2>&1"),
-        ],
-    ),
-    dict(
-        key="vpnc", title="VPNC (Cisco IPSec)", kind="docker",
-        target="vpnc-server", ports=["500/udp", "4500/udp"],
-        probes=[("udp", 500), ("udp", 4500)], group="ipsec500",
-        subnet="192.168.47.0/24", gateway="192.168.47.1",
-        client="VPNC/clients/vpnc.conf", docs="VPNC/VPNC使用指南.md",
-        verify="docker exec vpnc-server ipsec statusall | grep cisco-vpnc",
-        note="IKEv1 Aggressive+PSK+XAUTH；与 strongSwan / L2TP/IPsec 三选一。",
-        client_hint="`ipsec statusall` 出现 `cisco-vpnc` 且 Security Associations 不为 0；无 ping 网关，以客户端能否出网为准。客户端 `tun0=192.168.47.x`。",
-        clients_cmds=[
-            ("IPsec 状态 (cisco-vpnc)", "docker",
-             "exec vpnc-server ipsec statusall 2>&1 | grep -A8 cisco-vpnc || echo '（未加载 cisco-vpnc 连接）'"),
-            ("charon 日志", "docker",
-             "exec vpnc-server sh -c 'tail -n 30 /var/log/charon.log 2>/dev/null' || echo '（无 charon.log）'"),
-        ],
-    ),
-]
+# --------------------------------------------------------------------------- #
+# 协议清单：唯一事实源在 config/protocols/*.toml。
+# 启动时加载并构建与旧版一致的内存结构（VPN_DEFS/VPN_BY_KEY/LOG_EVENTS/
+# CERT_CHECKS），其余代码与 web.py 无需感知清单来源。
+# --------------------------------------------------------------------------- #
+CONFIG_DIR = ROOT / "config" / "protocols"
 
-VPN_BY_KEY = {d["key"]: d for d in VPN_DEFS}
-
-# 连接事件关键词：用于在实时日志里高亮「客户端连接/断开」等服务端事件。
+# key -> 连接事件正则：实时日志里高亮「客户端连接/断开」等服务端事件。
 # 注意：不要用进程名（xl2tpd/pppd/ocserv…），它们出现在该单元的每一行，会匹配全部日志。
-LOG_EVENTS = {
-    "openvpn": r"Peer Connection Initiated|MULTI: primary virtual IP|Initialization Sequence Completed|AUTH_FAILED|TLS: Initial packet|SIGUSR1|client-instance|client/",
-    "l2tp-ipsec": r"ESTABLISHED|CHILD_SA|installed|Call established|IP address|Connect: ppp|Connection terminated|Terminating pppd|LCP terminated|CHAP|PAP|ppp0|AUTH|IKE_SA|deleting",
-    "l2tp-plain": r"Call established|IP address|Connect: ppp|Connection terminated|Terminating pppd|LCP terminated|CHAP|PAP|ppp0|peer |AUTH",
-    "strongswan": r"ESTABLISHED|CHILD_SA|IKE_SA|installed|deleting|AUTH",
-    "pptp": r"Connect:|IP address|Connection terminated|Terminating pppd|LCP terminated|CHAP|PAP|ppp0|GRE|MPPE|peer ",
-    "openconnect": r"login|connect|user|DTLS|session|authenticated|accepted|disconnect",
-    "vpnc": r"CHILD_SA|IKE_SA|XAUTH|established|MODE_CFG|MODE_CONFIG|peer",
-}
+LOG_EVENTS = {}
+# [(key, Path)]：绑定 IP、需校验 CN 的服务器证书。
+CERT_CHECKS = []
 
-CERT_CHECKS = [
-    ("strongswan", ROOT / "Strongswan/pki/certs/server.crt"),
-    ("openconnect", ROOT / "OpenConnect/etc/ocserv/server.crt"),
-]
+
+def _load_protocols():
+    if not CONFIG_DIR.is_dir():
+        sys.exit(f"缺少协议清单目录：{CONFIG_DIR}")
+    defs = []
+    _certs = {}
+    for path in sorted(CONFIG_DIR.glob("*.toml")):
+        try:
+            with open(path, "rb") as fh:
+                raw = tomllib.load(fh)
+        except tomllib.TOMLDecodeError as exc:
+            sys.exit(f"协议清单解析失败 {path}: {exc}")
+        key = raw.get("key") or path.stem
+        defs.append({
+            "key": key,
+            "title": raw.get("title", key),
+            "kind": raw.get("kind", "docker"),
+            "target": raw["target"],
+            "ports": list(raw.get("ports", [])),
+            "probes": [(p["proto"], int(p["port"])) for p in raw.get("probes", [])],
+            "group": raw.get("group") or None,
+            "subnet": raw.get("subnet", ""),
+            "gateway": raw.get("gateway", ""),
+            "client": raw.get("client", ""),
+            "docs": raw.get("docs", ""),
+            "verify": raw.get("verify", ""),
+            "note": raw.get("note", ""),
+            "client_hint": raw.get("client_hint", ""),
+            "clients_cmds": [(c["label"], c["kind"], c["cmd"])
+                             for c in raw.get("clients_cmds", [])],
+            "order": int(raw.get("order", 0)),
+        })
+        if raw.get("log_events"):
+            LOG_EVENTS[key] = raw["log_events"]
+        if raw.get("cert_check"):
+            _certs[key] = ROOT / raw["cert_check"]
+    defs.sort(key=lambda d: (d["order"], d["key"]))
+    for d in defs:
+        if d["key"] in _certs:
+            CERT_CHECKS.append((d["key"], _certs[d["key"]]))
+    return defs
+
+
+VPN_DEFS = _load_protocols()
+VPN_BY_KEY = {d["key"]: d for d in VPN_DEFS}
 
 DOCKER_MODE = None
 

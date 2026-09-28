@@ -1,0 +1,39 @@
+# L2TP (纯, 无 IPsec) —— 协议清单
+order = 30
+key = "l2tp-plain"
+title = "L2TP (纯, 无 IPsec)"
+kind = "systemd"
+target = "xl2tpd.service"
+ports = ["1701/udp"]
+subnet = "192.168.44.0/24"
+gateway = "192.168.44.1"
+client = "L2TP_PLAIN/"
+docs = "L2TP_PLAIN/L2TP_PLAIN使用指南.md"
+verify = "systemctl status xl2tpd; ss -ulnp | grep 1701"
+note = "宿主机 xl2tpd+pppd（非容器）；1701/udp 与 L2TP/IPsec 内层冲突。"
+client_hint = "宿主机出现 pppX 接口且地址 192.168.44.x（`ip -4 addr show | grep ppp`），`ps -ef | grep pppd` 有进程，`journalctl -u xl2tpd` 有 Call established。客户端拿到 192.168.44.x 即连到裸 L2TP（无 IPsec）。"
+log_events = "Call established|IP address|Connect: ppp|Connection terminated|Terminating pppd|LCP terminated|CHAP|PAP|ppp0|peer |AUTH"
+
+[[probes]]
+proto = "udp"
+port = 1701
+
+[[clients_cmds]]
+label = "xl2tpd 服务"
+kind = "host"
+cmd = "systemctl status xl2tpd --no-pager 2>&1 | head -12"
+
+[[clients_cmds]]
+label = "宿主机 ppp 接口"
+kind = "host"
+cmd = "ip -4 addr show 2>&1 | grep -A3 'ppp' || echo '（无 ppp 接口，暂无客户端）'"
+
+[[clients_cmds]]
+label = "pppd 进程"
+kind = "host"
+cmd = "ps -ef 2>&1 | grep -E '[p]ppd' || echo '（无客户端进程）'"
+
+[[clients_cmds]]
+label = "最近日志"
+kind = "host"
+cmd = "journalctl -q -u xl2tpd -n 40 --no-pager 2>&1 | tail -25"

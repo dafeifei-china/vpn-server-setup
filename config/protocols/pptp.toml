@@ -1,0 +1,34 @@
+# PPTP —— 协议清单
+order = 50
+key = "pptp"
+title = "PPTP"
+kind = "docker"
+target = "pptp-server"
+ports = ["1723/tcp", "GRE/47"]
+subnet = "192.168.45.0/24"
+gateway = "192.168.45.1"
+client = "PPTP/"
+docs = "PPTP/PPTP使用指南.md"
+verify = "ss -tlnp | grep 1723"
+note = "需 --net host --privileged（GRE 协议 47）；可与任意 VPN 共存。"
+client_hint = "容器内出现 pppX 接口与 pppd 进程；客户端 `ppp0=192.168.45.x`。服务端 `docker exec pptp-server ip -4 addr` 可见对端地址。"
+log_events = "Connect:|IP address|Connection terminated|Terminating pppd|LCP terminated|CHAP|PAP|ppp0|GRE|MPPE|peer "
+
+[[probes]]
+proto = "tcp"
+port = 1723
+
+[[clients_cmds]]
+label = "pppd 进程"
+kind = "docker"
+cmd = "exec pptp-server ps -ef 2>&1 | grep -E '[p]ppd|[p]ptpd' || echo '（无客户端进程）'"
+
+[[clients_cmds]]
+label = "容器内 ppp 接口"
+kind = "docker"
+cmd = "exec pptp-server ip -4 addr show 2>&1 | grep -A3 'ppp' || echo '（无 ppp 接口，暂无客户端）'"
+
+[[clients_cmds]]
+label = "最近日志"
+kind = "docker"
+cmd = "logs --tail 80 pptp-server 2>&1 | grep -iE 'pppd|pptpd|connect|peer' | tail -20 || echo '（无相关日志）'"

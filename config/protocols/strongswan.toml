@@ -1,0 +1,30 @@
+# strongSwan (IKEv2) —— 协议清单
+order = 40
+key = "strongswan"
+title = "strongSwan (IKEv2)"
+kind = "docker"
+target = "strongswan-server"
+ports = ["500/udp", "4500/udp"]
+group = "ipsec500"
+subnet = "10.10.10.0/24"
+gateway = "10.10.10.1"
+client = "Strongswan/clients/"
+docs = "Strongswan/STRONGSWAN使用指南.md"
+verify = "docker exec strongswan-server ipsec statusall"
+note = "服务器证书绑定 IP；与 L2TP/IPsec / VPNC 三选一。"
+client_hint = "`ipsec statusall` 出现 `ikev2-cert[...]: ESTABLISHED` 并分配 10.10.10.x。strongSwan 是路由型隧道，没有 ppp/tun 接口。"
+log_events = "ESTABLISHED|CHILD_SA|IKE_SA|installed|deleting|AUTH"
+cert_check = "Strongswan/pki/certs/server.crt"
+
+[[probes]]
+proto = "udp"
+port = 500
+
+[[probes]]
+proto = "udp"
+port = 4500
+
+[[clients_cmds]]
+label = "IKEv2 状态"
+kind = "docker"
+cmd = "exec strongswan-server ipsec statusall 2>&1"
