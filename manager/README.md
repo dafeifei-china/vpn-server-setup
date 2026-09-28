@@ -60,6 +60,17 @@ cd manager
 `state/logs/<key>.jsonl`（全部原始日志，5MB×3 轮转）。面板接口 `/api/events`、`/api/audit` 提供同样数据；
 每次启停/重启/启用禁用都会以 `actor`（CLI 用户名或网页面板来源 IP）与 `source`（cli/web）写入审计。
 
+### 健康守护与告警
+
+- `./vpnctl health [--json]`：一次性检查各服务运行/端口、证书到期天数、证书 CN 与当前 IP 是否一致。
+- `./vpnctl alerts [--tail N] [--json]`：查看守护进程产生的告警。
+- `./vpnctl watch [--once] [--interval N] [<key>...]`：前台运行健康守护（`--once` 只检查一次）。
+
+守护周期读取 `config/platform.toml`（间隔 30s、证书告警阈值 30 天、是否自动重启、桌面/webhook 告警）。
+告警始终落库 `state/vpnplat.db` 的 `alerts` 表；桌面通知用 `notify-send`（`alerts.desktop`），
+可选 POST 到 `alerts.webhook`。触发条件：服务启动/停止迁移、运行中端口未监听、`failed` 状态
+（可选自动重启，默认关闭）、服务器 IP 变化、证书即将到期（每天最多一次）。面板接口 `/api/health`、`/api/alerts`。
+
 **互斥逻辑**：`strongswan` / `l2tp-ipsec` / `vpnc` 同属 `ipsec500` 组（抢 500,4500/udp）。
 `up` 默认先停同组其它服务；想强制共存（一般不这样）加 `--keep-conflicts`。
 

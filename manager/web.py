@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import vpnctl
+import health
 
 TOKEN_FILE = vpnctl.MANAGER_DIR / ".token"
 READ_ONLY = False
@@ -834,6 +835,12 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query)
             tail = int((q.get("tail") or ["50"])[0])
             return self._json(200, vpnctl.store.recent_audit(tail))
+        if u.path == "/api/health":
+            return self._json(200, health.check_all())
+        if u.path == "/api/alerts":
+            q = parse_qs(u.query)
+            tail = int((q.get("tail") or ["50"])[0])
+            return self._json(200, vpnctl.store.recent_alerts(tail))
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -879,6 +886,8 @@ def main():
     p.add_argument("--token", help="指定操作令牌（配合 --auth 使用）")
     p.add_argument("--no-collect", action="store_true",
                    help="不启动后台日志采集器（默认启动：连接事件落库）")
+    p.add_argument("--no-watch", action="store_true",
+                   help="不启动后台健康守护（默认启动：状态/证书/IP 告警）")
     args = p.parse_args()
     READ_ONLY = args.read_only
     REQUIRE_TOKEN = args.auth and not args.no_auth
@@ -897,10 +906,25 @@ def main():
         except Exception as e:  # 采集器失败不应阻断面板
             collector_status = f"启动失败：{e}"
 
+    watchdog_status = "未启动"
+    if not args.no_watch:
+        try:
+            import watchdog
+            _wlock = watchdog.acquire_lock()
+            if _wlock is None:
+                watchdog_status = "已有守护进程在运行，跳过"
+            else:
+                _wd = watchdog.Watchdog()
+                _wd.start()
+                watchdog_status = "已启动（状态/证书/IP 告警）"
+        except Exception as e:
+            watchdog_status = f"启动失败：{e}"
+
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print("=" * 56)
     print(f"  VPN 管控平台  http://{args.host}:{args.port}")
     print(f"  日志采集器: {collector_status}")
+    print(f"  健康守护: {watchdog_status}")
     print(f"  只读模式: {'是' if READ_ONLY else '否'}   令牌校验: {'开' if REQUIRE_TOKEN else '关（打开即可用）'}")
     if REQUIRE_TOKEN:
         print(f"  操作令牌: {TOKEN}")

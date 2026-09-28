@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
 
+CREATE TABLE IF NOT EXISTS alerts (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      REAL NOT NULL,
+    level   TEXT NOT NULL,
+    title   TEXT NOT NULL,
+    message TEXT,
+    source  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts);
+
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -88,6 +98,30 @@ def record_audit(action, key=None, ok=True, actor=None, source="cli",
         con.commit()
 
 
+def record_alert(level, title, message="", source="watchdog", ts=None):
+    with closing(connect()) as con:
+        con.execute("INSERT INTO alerts(ts,level,title,message,source) VALUES(?,?,?,?,?)",
+                    (float(ts or time.time()), level, title, (message or "")[:4000], source))
+        con.commit()
+
+
+# --------------------------------------------------------------------------- #
+# 键值状态（守护进程跨重启记住上次状态）
+# --------------------------------------------------------------------------- #
+def get_meta(key, default=None):
+    with closing(connect()) as con:
+        row = con.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_meta(key, value):
+    with closing(connect()) as con:
+        con.execute("INSERT INTO meta(k,v) VALUES(?,?) "
+                    "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                    (key, str(value)))
+        con.commit()
+
+
 # --------------------------------------------------------------------------- #
 # 查询
 # --------------------------------------------------------------------------- #
@@ -114,28 +148,40 @@ def recent_audit(limit=200):
     return [dict(r) for r in rows]
 
 
+def recent_alerts(limit=200):
+    limit = max(1, min(int(limit), 5000))
+    with closing(connect()) as con:
+        rows = con.execute(
+            "SELECT ts,level,title,message,source FROM alerts "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def counts():
     with closing(connect()) as con:
         ev = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         ev_by_key = {r[0]: r[1] for r in con.execute(
             "SELECT key, COUNT(*) FROM events GROUP BY key")}
         au = con.execute("SELECT COUNT(*) FROM audit").fetchone()[0]
+        al = con.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
     size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
     return {"db": str(DB_PATH), "db_bytes": size,
-            "events": ev, "events_by_key": ev_by_key, "audit": au}
+            "events": ev, "events_by_key": ev_by_key, "audit": au, "alerts": al}
 
 
 # --------------------------------------------------------------------------- #
 # 维护
 # --------------------------------------------------------------------------- #
-def prune(events_days=30, audit_days=180, max_events=200000):
-    """删除过期事件/审计，并限制 events 总量，避免无限增长。"""
+def prune(events_days=30, audit_days=180, alerts_days=90, max_events=200000):
+    """删除过期事件/审计/告警，并限制 events 总量，避免无限增长。"""
     now = time.time()
     with closing(connect()) as con:
         deleted = con.execute("DELETE FROM events WHERE ts < ?",
                               (now - events_days * 86400,)).rowcount
         deleted += con.execute("DELETE FROM audit WHERE ts < ?",
                                (now - audit_days * 86400,)).rowcount
+        deleted += con.execute("DELETE FROM alerts WHERE ts < ?",
+                               (now - alerts_days * 86400,)).rowcount
         deleted += con.execute(
             "DELETE FROM events WHERE id NOT IN "
             "(SELECT id FROM events ORDER BY id DESC LIMIT ?)",

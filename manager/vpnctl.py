@@ -654,6 +654,56 @@ def cmd_prune(args):
     return 0
 
 
+def cmd_health(args):
+    import health
+    data = health.check_all()
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    print(f"服务器 IP : {data['server_ip']}\n")
+    rows = [[s["key"], s["title"], s["status"],
+             "UP" if s["running"] else "DOWN",
+             "是" if s["listening"] else "否",
+             "；".join(s["unhealthy"]) or "-"] for s in data["services"]]
+    print(_fmt_table(rows, ["KEY", "名称", "原始", "运行", "端口", "异常"]))
+    if data["certs"]:
+        print("\n绑定 IP 的服务器证书:")
+        for c in data["certs"]:
+            dl = "?" if c["days_left"] is None else f"{c['days_left']:.0f} 天"
+            flag = "IP 匹配" if c["matches_ip"] else "IP 不一致(需重签)"
+            print(f"  {c['key']:<12} CN={c['cn']}  剩余 {dl}  [{flag}]  {c['path']}")
+    print("\n问题:")
+    if not data["problems"]:
+        print("  无")
+    for p in data["problems"]:
+        print(f"  - {p}")
+    return 0
+
+
+def cmd_alerts(args):
+    rows = store.recent_alerts(args.tail)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print("（无告警记录）")
+        return 0
+    for r in rows:
+        print(f"{_fmt_ts(r['ts'])}  {r['level'].upper():<7} {r['title']}  {r['message']}")
+    return 0
+
+
+def cmd_watch(args):
+    import watchdog
+    argv = []
+    if args.once:
+        argv.append("--once")
+    if args.interval:
+        argv += ["--interval", str(args.interval)]
+    argv += list(args.keys or [])
+    return watchdog.main(argv)
+
+
 def cmd_ip(args):
     print(server_ip())
     return 0
@@ -739,6 +789,21 @@ def build_parser():
     sp.add_argument("--events-days", type=int, default=30)
     sp.add_argument("--audit-days", type=int, default=180)
     sp.set_defaults(func=cmd_prune)
+
+    sp = sub.add_parser("health", help="健康检查：服务/端口/证书到期/IP 绑定")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_health)
+
+    sp = sub.add_parser("alerts", help="查看守护进程产生的告警")
+    sp.add_argument("--tail", type=int, default=50)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_alerts)
+
+    sp = sub.add_parser("watch", help="前台运行健康守护（周期检查 + 告警）")
+    sp.add_argument("--once", action="store_true", help="只检查一次并打印 JSON")
+    sp.add_argument("--interval", type=int, help="覆盖检查间隔（秒）")
+    sp.add_argument("keys", nargs="*", help="只守护指定协议 key（默认全部）")
+    sp.set_defaults(func=cmd_watch)
     return p
 
 

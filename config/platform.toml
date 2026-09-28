@@ -1,0 +1,16 @@
+# vpnctl 平台配置（P3：健康守护 / 证书 / 告警）
+# 修改后无需重启代码；守护进程下一次 tick 即生效（面板重启后生效最稳妥）。
+
+[health]
+interval = 30          # 健康检查间隔（秒）
+auto_restart = false   # 仅对 failed 状态的服务自动重启（默认关闭）
+restart_cooldown = 300 # 同一服务两次自动重启的最小间隔（秒）
+dedup_seconds = 600    # 同类健康告警的去重窗口（秒）
+
+[certs]
+warn_days = 30         # 证书到期前多少天开始告警
+
+[alerts]
+desktop = true         # 用 notify-send 发桌面通知（若当前环境可用）
+min_level = "warning"  # 低于该级别的告警只落库、不弹桌面：info|warning|error
+webhook = ""           # 可选：POST JSON 到该 URL（{level,title,message}）
