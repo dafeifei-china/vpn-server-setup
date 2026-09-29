@@ -312,6 +312,12 @@ const fmtTs = (ts) => { try { return new Date(ts * 1000).toLocaleString(); } cat
 
 let LIST = null, VPNS = [], ACTIVE = 'overview', TAB = 'overview', DETAIL = null;
 let autoTimer = null, logES = null, logBuf = [], logRenderTimer = null, logPause = false, menuCollapsed = false;
+let OV_SIG = null, OV_EXTRA = { alerts: '', audit: '' }, MENU_SIG = null, CRUMB_SIG = null;
+
+function ovSig() {
+  return (LIST ? LIST.server_ip : '') + '|' + VPNS.map(v =>
+    v.key + ':' + v.status + ':' + (v.running ? 1 : 0) + ':' + ((v.probes_open || []).join(','))).join(';');
+}
 
 function prefs(key) { try { return JSON.parse(localStorage.getItem('vpnctl.prefs.' + key)) || {}; } catch(e) { return {}; } }
 function setPref(key, k, v) { const p = prefs(key); p[k] = v; localStorage.setItem('vpnctl.prefs.' + key, JSON.stringify(p)); }
@@ -325,6 +331,10 @@ function toast(msg, ms) {
 
 /* ---------------- sidebar ---------------- */
 function renderSidebar() {
+  const sig = ACTIVE + '|' + menuCollapsed + '|' +
+    VPNS.map(v => v.key + ':' + v.status).join(',');
+  if (sig === MENU_SIG && $('#menu').children.length) return;
+  MENU_SIG = sig;
   const items = VPNS.map(v =>
     '<button class="menu-item ' + (ACTIVE === v.key ? 'active' : '') + '" data-view="' + v.key + '" title="' + esc(v.title) + '">'
     + icon(v.key) + '<span class="label">' + esc(v.title) + '</span>'
@@ -342,9 +352,13 @@ function renderSidebar() {
 }
 
 function setCrumb() {
-  if (ACTIVE === 'overview') { $('#crumb').innerHTML = '数据看板<small>全部 VPN 服务总览</small>'; return; }
-  const v = VPNS.find(x => x.key === ACTIVE);
-  $('#crumb').innerHTML = esc(v ? v.title : ACTIVE) + '<small>' + (v ? esc(v.kind + ' · ' + v.target) : '') + '</small>';
+  const html = (ACTIVE === 'overview')
+    ? '数据看板<small>全部 VPN 服务总览</small>'
+    : (() => { const v = VPNS.find(x => x.key === ACTIVE);
+        return esc(v ? v.title : ACTIVE) + '<small>' + (v ? esc(v.kind + ' · ' + v.target) : '') + '</small>'; })();
+  if (html === CRUMB_SIG) return;
+  CRUMB_SIG = html;
+  $('#crumb').innerHTML = html;
 }
 
 /* ---------------- router ---------------- */
@@ -366,7 +380,11 @@ async function fetchList() {
   $('#rochip').style.display = d.read_only ? '' : 'none';
   const ti = $('#token'); if (ti) ti.style.display = d.auth ? '' : 'none';
   renderSidebar(); setCrumb();
-  if (ACTIVE === 'overview') renderOverview();
+  if (ACTIVE === 'overview') {
+    const sig = ovSig();
+    if (sig !== OV_SIG) { OV_SIG = sig; renderOverview(); }
+    else loadOverviewExtras();   // 数据未变：只就地刷新告警/操作，不重建页面
+  }
 }
 
 async function loadDetail(key, full) {
@@ -450,8 +468,8 @@ function renderOverview() {
     + '</div>'
     + '</div>'
     + '<div class="grid two" style="margin-bottom:14px">'
-    + '<div class="card"><h3>最近告警</h3><div id="ov-alerts" class="note">加载中…</div></div>'
-    + '<div class="card"><h3>最近操作</h3><div id="ov-audit" class="note">加载中…</div></div>'
+    + '<div class="card"><h3>最近告警</h3><div id="ov-alerts" class="note">' + (OV_EXTRA.alerts || '加载中…') + '</div></div>'
+    + '<div class="card"><h3>最近操作</h3><div id="ov-audit" class="note">' + (OV_EXTRA.audit || '加载中…') + '</div></div>'
     + '</div>'
     + '<div class="card" style="padding:0;overflow:hidden">'
     + '<div style="padding:16px 16px 6px"><h3 style="margin:0">全部服务</h3></div>'
@@ -461,18 +479,18 @@ function renderOverview() {
 
   $$('#content [data-manage]').forEach(el => el.onclick = () => go(el.dataset.manage));
   $$('#content [data-act]').forEach(b => b.onclick = (e) => { e.stopPropagation(); act(b.dataset.key, b.dataset.act); });
+  OV_SIG = ovSig();
   loadOverviewExtras();
 }
 
+// 只就地更新告警/操作卡片：内容未变不碰 DOM，避免自动刷新闪动
 async function loadOverviewExtras() {
   if (ACTIVE !== 'overview') return;
-  const abox = $('#ov-alerts');
   try {
     const [alerts, h] = await Promise.all([
       fetch('/api/alerts?tail=8').then(r => r.json()),
       fetch('/api/health').then(r => r.json()),
     ]);
-    if (ACTIVE !== 'overview' || !abox) return;
     let html = '';
     if (h.problems && h.problems.length)
       html += '<div class="banner err" style="margin:0 0 10px">健康异常：' + esc(h.problems.join('；')) + '</div>';
@@ -480,18 +498,25 @@ async function loadOverviewExtras() {
       ? alerts.map(a => '<div class="alertrow"><span class="lvl ' + esc(a.level) + '">' + esc(a.level)
           + '</span><span class="at">' + esc(fmtTs(a.ts)) + '</span><span>' + esc(a.title) + '</span></div>').join('')
       : '<span class="muted">暂无告警</span>';
-    abox.innerHTML = html;
-  } catch (e) { if (abox) abox.innerHTML = '<span class="muted">加载失败</span>'; }
+    if (html !== OV_EXTRA.alerts) {
+      OV_EXTRA.alerts = html;
+      const box = $('#ov-alerts');
+      if (box && ACTIVE === 'overview') box.innerHTML = html;
+    }
+  } catch (e) { /* 保留上次内容 */ }
   try {
     const audit = await fetch('/api/audit?tail=8').then(r => r.json());
-    const ubox = $('#ov-audit');
-    if (ACTIVE !== 'overview' || !ubox) return;
-    ubox.innerHTML = audit.length
+    const html = audit.length
       ? audit.map(a => '<div class="alertrow"><span class="lvl ' + (a.ok ? 'info' : 'error') + '">'
           + (a.ok ? 'OK' : 'FAIL') + '</span><span class="at">' + esc(fmtTs(a.ts)) + '</span><span>'
           + esc(a.action + ' ' + (a.key || '')) + '</span><span class="who">' + esc(a.actor || '') + '</span></div>').join('')
       : '<span class="muted">暂无操作记录</span>';
-  } catch (e) { /* ignore */ }
+    if (html !== OV_EXTRA.audit) {
+      OV_EXTRA.audit = html;
+      const box = $('#ov-audit');
+      if (box && ACTIVE === 'overview') box.innerHTML = html;
+    }
+  } catch (e) { /* 保留上次内容 */ }
 }
 
 /* ---------------- vpn page ---------------- */
