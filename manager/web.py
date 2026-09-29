@@ -16,6 +16,7 @@ import select
 import signal
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -25,6 +26,16 @@ import health
 TOKEN_FILE = vpnctl.MANAGER_DIR / ".token"
 READ_ONLY = False
 REQUIRE_TOKEN = False  # 默认本机开放（只绑 127.0.0.1）；如需令牌用 --auth 打开
+
+_HEALTH_CACHE = {"ts": 0.0, "data": None}
+
+
+def health_cached(ttl=5):
+    now = time.time()
+    if _HEALTH_CACHE["data"] is None or now - _HEALTH_CACHE["ts"] >= ttl:
+        _HEALTH_CACHE["data"] = health.check_all()
+        _HEALTH_CACHE["ts"] = now
+    return _HEALTH_CACHE["data"]
 
 
 def load_token():
@@ -216,6 +227,16 @@ PAGE = r"""<!DOCTYPE html>
   select { background:#fff; border:1px solid var(--line); color:var(--fg);
            border-radius:7px; padding:5px 8px; font-size:12.5px; font-family:inherit; }
   .muted { color:var(--mut); font-size:12px; }
+  .alertrow { display:flex; gap:8px; align-items:baseline; padding:5px 0;
+              border-bottom:1px dashed var(--line); font-size:12.5px; }
+  .alertrow:last-child { border-bottom:0; }
+  .alertrow .at { color:var(--mut); font-size:11.5px; white-space:nowrap; }
+  .alertrow .lvl { text-transform:uppercase; font-size:10.5px; border-radius:4px;
+                   padding:1px 6px; background:#eef1f5; color:#5b6878; flex:none; }
+  .alertrow .lvl.warning { background:#fdf4e3; color:#b07d16; }
+  .alertrow .lvl.error { background:#fdecec; color:#c53030; }
+  .alertrow .lvl.info { background:#e8f1fc; color:#2f7ed8; }
+  .alertrow .who { color:var(--mut); margin-left:auto; white-space:nowrap; }
   .pref { display:flex; align-items:center; gap:9px; padding:9px 0; border-bottom:1px solid var(--line);
           font-size:13px; }
   .pref:last-child { border-bottom:0; }
@@ -287,6 +308,7 @@ const STATUS_TEXT = { running:'运行中', active:'运行中', exited:'已停止
 const stateCls = (st) => (st === 'running' || st === 'active') ? 'up'
                        : (st === 'failed' ? 'err' : 'down');
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtTs = (ts) => { try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; } };
 
 let LIST = null, VPNS = [], ACTIVE = 'overview', TAB = 'overview', DETAIL = null;
 let autoTimer = null, logES = null, logBuf = [], logRenderTimer = null, logPause = false, menuCollapsed = false;
@@ -427,6 +449,10 @@ function renderOverview() {
     +   '<h3 style="margin-top:20px">互斥组</h3>' + groupHTML
     + '</div>'
     + '</div>'
+    + '<div class="grid two" style="margin-bottom:14px">'
+    + '<div class="card"><h3>最近告警</h3><div id="ov-alerts" class="note">加载中…</div></div>'
+    + '<div class="card"><h3>最近操作</h3><div id="ov-audit" class="note">加载中…</div></div>'
+    + '</div>'
     + '<div class="card" style="padding:0;overflow:hidden">'
     + '<div style="padding:16px 16px 6px"><h3 style="margin:0">全部服务</h3></div>'
     + '<table><thead><tr><th>服务</th><th>类型</th><th>状态</th><th>监听端口</th>'
@@ -435,6 +461,37 @@ function renderOverview() {
 
   $$('#content [data-manage]').forEach(el => el.onclick = () => go(el.dataset.manage));
   $$('#content [data-act]').forEach(b => b.onclick = (e) => { e.stopPropagation(); act(b.dataset.key, b.dataset.act); });
+  loadOverviewExtras();
+}
+
+async function loadOverviewExtras() {
+  if (ACTIVE !== 'overview') return;
+  const abox = $('#ov-alerts');
+  try {
+    const [alerts, h] = await Promise.all([
+      fetch('/api/alerts?tail=8').then(r => r.json()),
+      fetch('/api/health').then(r => r.json()),
+    ]);
+    if (ACTIVE !== 'overview' || !abox) return;
+    let html = '';
+    if (h.problems && h.problems.length)
+      html += '<div class="banner err" style="margin:0 0 10px">健康异常：' + esc(h.problems.join('；')) + '</div>';
+    html += alerts.length
+      ? alerts.map(a => '<div class="alertrow"><span class="lvl ' + esc(a.level) + '">' + esc(a.level)
+          + '</span><span class="at">' + esc(fmtTs(a.ts)) + '</span><span>' + esc(a.title) + '</span></div>').join('')
+      : '<span class="muted">暂无告警</span>';
+    abox.innerHTML = html;
+  } catch (e) { if (abox) abox.innerHTML = '<span class="muted">加载失败</span>'; }
+  try {
+    const audit = await fetch('/api/audit?tail=8').then(r => r.json());
+    const ubox = $('#ov-audit');
+    if (ACTIVE !== 'overview' || !ubox) return;
+    ubox.innerHTML = audit.length
+      ? audit.map(a => '<div class="alertrow"><span class="lvl ' + (a.ok ? 'info' : 'error') + '">'
+          + (a.ok ? 'OK' : 'FAIL') + '</span><span class="at">' + esc(fmtTs(a.ts)) + '</span><span>'
+          + esc(a.action + ' ' + (a.key || '')) + '</span><span class="who">' + esc(a.actor || '') + '</span></div>').join('')
+      : '<span class="muted">暂无操作记录</span>';
+  } catch (e) { /* ignore */ }
 }
 
 /* ---------------- vpn page ---------------- */
@@ -457,7 +514,7 @@ function renderVpnPage() {
     + '<div id="vbanner"></div>'
     + '<div class="tabs">'
     +   tabBtn('overview', '状态概览') + tabBtn('config', '配置信息')
-    +   tabBtn('logs', '实时日志')
+    +   tabBtn('logs', '实时日志') + tabBtn('events', '历史事件')
     + '</div><div id="vtabbody"></div>';
   $$('#content [data-act]').forEach(b => b.onclick = () => act(v.key, b.dataset.act));
   $$('#content .tab').forEach(b => b.onclick = () => { TAB = b.dataset.tab; renderVpnBody(); });
@@ -513,6 +570,18 @@ function renderVpnBody() {
       + '</div>';
     $('#pref-auto').onchange = e => { setPref(v.key, 'autoStop', e.target.checked); toast('已保存：自动停用互斥 = ' + (e.target.checked ? '开' : '关')); };
     $('#pref-tail').onchange = e => setPref(v.key, 'tail', parseInt(e.target.value, 10));
+  } else if (TAB === 'events') {
+    body.innerHTML =
+      '<div class="card">'
+      + '<div class="logbar"><h3 style="margin:0">历史连接事件</h3>'
+      + '<span class="muted">来自后台采集器落库（state/vpnplat.db），客户端连接/断开时记录</span>'
+      + '<span class="spacer"></span>'
+      + '<label>行数 <select id="hist-tail">' + [40,80,200,500].map(n => '<option' + (n === tail(v.key) ? ' selected' : '') + '>' + n + '</option>').join('') + '</select></label>'
+      + '<button class="btn sm" id="hist-refresh">刷新</button></div>'
+      + '<pre class="pre" id="hist-out">加载中…</pre></div>';
+    $('#hist-tail').onchange = e => { setPref(v.key, 'tail', parseInt(e.target.value, 10)); loadHistoryEvents(v.key); };
+    $('#hist-refresh').onclick = () => loadHistoryEvents(v.key);
+    loadHistoryEvents(v.key);
   } else {
     const p = prefs(v.key);
     body.innerHTML =
@@ -660,6 +729,21 @@ async function loadOnce() {
   } catch (e) { if (out) out.textContent = '加载失败：' + e.message; }
 }
 
+/* ---------------- 历史连接事件（持久化） ---------------- */
+async function loadHistoryEvents(key) {
+  const out = $('#hist-out'); if (!out) return;
+  out.textContent = '加载中…';
+  try {
+    const rows = await fetch('/api/events?name=' + encodeURIComponent(key) + '&tail=' + tail(key)).then(r => r.json());
+    if (ACTIVE !== key || !$('#hist-out')) return;
+    if (!rows.length) {
+      out.innerHTML = '<span class="muted">（暂无持久化连接事件；后台采集器会在客户端连接/断开时记录）</span>';
+      return;
+    }
+    out.innerHTML = rows.map(r => '<mark>' + esc(fmtTs(r.ts) + '  [' + r.source + '] ' + r.line) + '</mark>').join('\n');
+  } catch (e) { if (out) out.textContent = '加载失败：' + e.message; }
+}
+
 /* ---------------- token (仅 --auth 时显示) ---------------- */
 function token() { return localStorage.getItem('vpnctl_token') || ''; }
 const _ti = $('#token');
@@ -675,7 +759,7 @@ async function tick() {
   if (ACTIVE !== 'overview') await loadDetail(ACTIVE, false);
 }
 $('#auto').addEventListener('change', setupTimer);
-$('#refresh').addEventListener('click', () => { fetchList().catch(() => {}); if (ACTIVE !== 'overview') loadDetail(ACTIVE, false); if (TAB === 'logs') restartLog(); });
+$('#refresh').addEventListener('click', () => { fetchList().catch(() => {}); if (ACTIVE !== 'overview') loadDetail(ACTIVE, false); if (TAB === 'logs') restartLog(); if (TAB === 'events' && ACTIVE !== 'overview') loadHistoryEvents(ACTIVE); });
 
 async function boot() {
   try { await fetchList(); } catch (e) { $('#content').innerHTML = '<div class="empty">无法连接后端：' + esc(e.message) + '</div>'; return; }
@@ -836,7 +920,7 @@ class Handler(BaseHTTPRequestHandler):
             tail = int((q.get("tail") or ["50"])[0])
             return self._json(200, vpnctl.store.recent_audit(tail))
         if u.path == "/api/health":
-            return self._json(200, health.check_all())
+            return self._json(200, health_cached())
         if u.path == "/api/alerts":
             q = parse_qs(u.query)
             tail = int((q.get("tail") or ["50"])[0])
