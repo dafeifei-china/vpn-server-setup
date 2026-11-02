@@ -157,6 +157,19 @@ def recent_alerts(limit=200):
     return [dict(r) for r in rows]
 
 
+def clear_alerts(keep_titles=None):
+    """Delete alerts whose title is not in keep_titles (titles of currently-active
+    problems). Returns (cleared, kept). Only resolved/historical alerts are removed."""
+    keep = set(keep_titles or [])
+    with closing(connect()) as con:
+        rows = con.execute("SELECT id, title FROM alerts").fetchall()
+        del_ids = [r["id"] for r in rows if r["title"] not in keep]
+        if del_ids:
+            con.executemany("DELETE FROM alerts WHERE id=?", [(i,) for i in del_ids])
+        con.commit()
+    return len(del_ids), len(rows) - len(del_ids)
+
+
 def counts():
     with closing(connect()) as con:
         ev = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]

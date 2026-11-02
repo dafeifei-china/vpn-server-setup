@@ -27,6 +27,28 @@ import store
 import vpnctl
 
 
+def active_alert_titles(data=None, cfg=None):
+    """Titles of alerts that reflect currently-active problems (must NOT be cleared).
+
+    Mirrors the exact title strings emitted in Watchdog._check_services/_check_certs.
+    Resolved problems (e.g. a cert that now matches the IP) drop out, so their
+    historical alerts become clearable.
+    """
+    data = data if data is not None else health.check_all()
+    cfg = cfg or settings.load()
+    warn = int(cfg["certs"].get("warn_days", 30))
+    active = set()
+    for c in data.get("certs", []):
+        if c.get("matches_ip") is False:
+            active.add("%s 证书与当前 IP 不一致" % c["key"])
+        if c.get("days_left") is not None and c["days_left"] <= warn:
+            active.add("%s 证书即将到期" % c["key"])
+    for s in data.get("services", []):
+        if s.get("unhealthy"):
+            active.add("%s 健康异常" % s["title"])
+    return active
+
+
 class Watchdog(threading.Thread):
     def __init__(self, cfg=None, keys=None):
         super().__init__(name="vpn-watchdog", daemon=True)

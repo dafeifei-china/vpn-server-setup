@@ -45,12 +45,13 @@ def service_health(d, live):
 
 def cert_health(key, path, ip):
     info = {"key": key, "path": str(path.relative_to(vpnctl.ROOT)),
-            "exists": path.exists(), "cn": None, "days_left": None,
-            "expires": None, "matches_ip": False}
+            "exists": path.exists(), "cn": None, "san_ips": [],
+            "days_left": None, "expires": None, "matches_ip": False}
     if not path.exists():
         return info
     info["cn"] = vpnctl.cert_cn(path)
-    info["matches_ip"] = info["cn"] == ip
+    info["san_ips"] = vpnctl.cert_san_ips(path)
+    info["matches_ip"] = vpnctl.cert_matches_ip(path, ip)
     out = vpnctl._run(["openssl", "x509", "-in", str(path),
                        "-noout", "-enddate"]).stdout.strip()
     if out.startswith("notAfter="):
@@ -76,7 +77,8 @@ def check_all():
         if c["days_left"] is not None and c["days_left"] <= 0:
             problems.append("%s 证书已过期" % c["key"])
         if not c["matches_ip"]:
-            problems.append("%s 证书 CN(%s) 与当前 IP(%s) 不一致"
-                            % (c["key"], c["cn"], ip))
+            name = c["cn"] or (", ".join(c.get("san_ips") or []) or "无 CN/SAN")
+            problems.append("%s 证书(CN/SAN=%s) 与当前 IP(%s) 不一致"
+                            % (c["key"], name, ip))
     return {"ts": time.time(), "server_ip": ip, "services": services,
             "certs": certs, "problems": problems}

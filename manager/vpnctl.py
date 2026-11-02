@@ -246,6 +246,27 @@ def cert_cn(path):
     return m.group(1) if m else None
 
 
+def cert_san_ips(path):
+    """IP entries in a certificate's subjectAltName, e.g. ['10.20.51.22']."""
+    if not path.exists():
+        return []
+    try:
+        out = _run(["openssl", "x509", "-in", str(path), "-noout", "-ext", "subjectAltName"]).stdout
+    except Exception:
+        return []
+    return re.findall(r"IP Address:([0-9A-Fa-f:.]+)", out)
+
+
+def cert_matches_ip(path, ip):
+    """True if the cert is valid for `ip` via subject CN or a SAN IP entry.
+
+    Modern certs (e.g. OpenConnect's) may carry the IP only in SAN, not CN.
+    """
+    if cert_cn(path) == ip:
+        return True
+    return ip in cert_san_ips(path)
+
+
 def vpn_state(d):
     st = {
         "key": d["key"], "title": d["title"], "kind": d["kind"],
@@ -399,6 +420,12 @@ def down(key, actor=None, source="cli"):
                    duration_ms=int((time.time() - t0) * 1000), actor=actor, source=source)
 
 
+def down_all(actor=None, source="cli"):
+    """Stop every currently-running VPN; return the per-service results (audited individually)."""
+    return [down(d["key"], actor=actor, source=source)
+            for d in VPN_DEFS if vpn_state(d)["running"]]
+
+
 def restart(key, stop_peers=True, actor=None, source="cli"):
     d = VPN_BY_KEY[key]
     t0 = time.time()
@@ -484,7 +511,8 @@ def doctor():
     for key, path in CERT_CHECKS:
         cn = cert_cn(path)
         certs.append({"key": key, "path": str(path.relative_to(ROOT)),
-                      "cn": cn, "matches_ip": cn == ip})
+                      "cn": cn, "sans": cert_san_ips(path),
+                      "matches_ip": cert_matches_ip(path, ip)})
     return {"docker_mode": mode, "server_ip": ip, "conflicts": conflicts,
             "certs": certs, "states": all_states()}
 
@@ -671,7 +699,8 @@ def cmd_health(args):
         for c in data["certs"]:
             dl = "?" if c["days_left"] is None else f"{c['days_left']:.0f} 天"
             flag = "IP 匹配" if c["matches_ip"] else "IP 不一致(需重签)"
-            print(f"  {c['key']:<12} CN={c['cn']}  剩余 {dl}  [{flag}]  {c['path']}")
+            name = c["cn"] or (",".join(c.get("san_ips") or []) or "-")
+            print(f"  {c['key']:<12} CN/SAN={name}  剩余 {dl}  [{flag}]  {c['path']}")
     print("\n问题:")
     if not data["problems"]:
         print("  无")
@@ -724,7 +753,8 @@ def cmd_doctor(args):
     print("\n绑定 IP 的服务器证书:")
     for c in doc["certs"]:
         flag = "OK" if c["matches_ip"] else "不一致(需重签)"
-        print(f"  {c['key']:<12} CN={c['cn']}  [{flag}]  {c['path']}")
+        sans = ",".join(c.get("sans") or []) or "-"
+        print(f"  {c['key']:<12} CN={c['cn'] or '-'}  SAN={sans}  [{flag}]  {c['path']}")
     print("\n各服务状态:")
     rows = [[s["key"], STATUS_ICON.get(s["status"], s["status"]), s["status"],
              ",".join(s["probes_open"]) or "-"] for s in doc["states"]]

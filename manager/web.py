@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import secrets
@@ -24,6 +25,7 @@ import vpnctl
 import health
 
 TOKEN_FILE = vpnctl.MANAGER_DIR / ".token"
+WEB_SERVICE = "vpn-manager-web.service"
 READ_ONLY = False
 REQUIRE_TOKEN = False  # 默认本机开放（只绑 127.0.0.1）；如需令牌用 --auth 打开
 
@@ -468,17 +470,25 @@ function renderOverview() {
     + '</div>'
     + '</div>'
     + '<div class="grid two" style="margin-bottom:14px">'
-    + '<div class="card"><h3>最近告警</h3><div id="ov-alerts" class="note">' + (OV_EXTRA.alerts || '加载中…') + '</div></div>'
+    + '<div class="card"><div style="display:flex;align-items:center;justify-content:space-between">'
+    +   '<h3 style="margin:0">最近告警</h3>'
+    +   '<button class="btn sm" id="btn-clear-alerts" title="只清除已解决的告警；当前仍存在的问题会保留">清空已解决</button></div>'
+    +   '<div id="ov-alerts" class="note">' + (OV_EXTRA.alerts || '加载中…') + '</div></div>'
     + '<div class="card"><h3>最近操作</h3><div id="ov-audit" class="note">' + (OV_EXTRA.audit || '加载中…') + '</div></div>'
     + '</div>'
     + '<div class="card" style="padding:0;overflow:hidden">'
-    + '<div style="padding:16px 16px 6px"><h3 style="margin:0">全部服务</h3></div>'
+    + '<div style="padding:14px 16px;display:flex;align-items:center;justify-content:space-between">'
+    +   '<h3 style="margin:0">全部服务</h3>'
+    +   '<button class="btn sm danger" id="btn-down-all"' + (up ? '' : ' disabled') + '>全部停止</button>'
+    + '</div>'
     + '<table><thead><tr><th>服务</th><th>类型</th><th>状态</th><th>监听端口</th>'
     + '<th>隧道网段</th><th>互斥组</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
     + '</div>';
 
   $$('#content [data-manage]').forEach(el => el.onclick = () => go(el.dataset.manage));
   $$('#content [data-act]').forEach(b => b.onclick = (e) => { e.stopPropagation(); act(b.dataset.key, b.dataset.act); });
+  const da = $('#btn-down-all'); if (da) da.onclick = downAll;
+  const ca = $('#btn-clear-alerts'); if (ca) ca.onclick = clearAlerts;
   OV_SIG = ovSig();
   loadOverviewExtras();
 }
@@ -682,6 +692,47 @@ async function act(key, action) {
   } catch (e) { toast('请求失败：' + e.message); }
 }
 
+/* ---------------- 一键停止全部 ---------------- */
+async function downAll() {
+  const running = VPNS.filter(v => v.running).length;
+  if (!running) { toast('当前没有运行中的 VPN 服务'); return; }
+  if (!confirm('确定停止全部正在运行的 VPN 服务（共 ' + running + ' 个）吗？')) return;
+  const btn = $('#btn-down-all');
+  if (btn) { btn.disabled = true; btn.textContent = '停止中…'; }
+  try {
+    const r = await fetch('/api/action', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VPNCTL-Token': token() },
+      body: JSON.stringify({ action: 'down-all' })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok)
+      toast('部分失败：' + (((d.failed || []).join('、')) || d.error || ('HTTP ' + r.status)), 7000);
+    else
+      toast('已停止全部 VPN' + ((d.stopped && d.stopped.length) ? '：' + d.stopped.join('、') : '（无运行中的服务）'));
+  } catch (e) { toast('请求失败：' + e.message); }
+  OV_SIG = null;                 // 强制重建总览，刷新状态与按钮
+  await fetchList();
+  if (ACTIVE !== 'overview') await loadDetail(ACTIVE, false);
+}
+
+/* ---------------- 清空已解决的告警 ---------------- */
+async function clearAlerts() {
+  const btn = $('#btn-clear-alerts'); if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/action', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VPNCTL-Token': token() },
+      body: JSON.stringify({ action: 'clear-alerts' })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) toast('清空失败：' + (d.error || ('HTTP ' + r.status)));
+    else if (d.kept) toast('已清空 ' + d.cleared + ' 条；保留 ' + d.kept + ' 条未解决的告警');
+    else toast('已清空 ' + d.cleared + ' 条历史告警');
+    OV_EXTRA.alerts = '';
+    await loadOverviewExtras();
+  } catch (e) { toast('请求失败：' + e.message); }
+  finally { const b = $('#btn-clear-alerts'); if (b) b.disabled = false; }
+}
+
 /* ---------------- 实时日志（SSE 流） ---------------- */
 function logSource(v) {
   return v.kind === 'docker' ? 'docker logs -f ' + v.target : 'journalctl -f -u ' + v.target;
@@ -788,7 +839,7 @@ $('#refresh').addEventListener('click', () => { fetchList().catch(() => {}); if 
 
 async function boot() {
   try { await fetchList(); } catch (e) { $('#content').innerHTML = '<div class="empty">无法连接后端：' + esc(e.message) + '</div>'; return; }
-  if (VPNS.length) go(VPNS[0].key); else renderOverview();
+  go('overview');   // 打开即进入数据看板
   setupTimer();
 }
 boot();
@@ -968,6 +1019,26 @@ class Handler(BaseHTTPRequestHandler):
         name = body.get("name")
         action = body.get("action")
         keep = bool(body.get("keep_conflicts"))
+        if action == "down-all":
+            actor = self.client_address[0]
+            try:
+                results = vpnctl.down_all(actor=actor, source="web")
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+            stopped = [r["key"] for r in results if r.get("ok")]
+            failed = [r["key"] for r in results if not r.get("ok")]
+            return self._json(200 if not failed else 500,
+                              {"ok": not failed, "action": "down-all",
+                               "stopped": stopped, "failed": failed, "results": results})
+        if action == "clear-alerts":
+            try:
+                import watchdog
+                keep = watchdog.active_alert_titles()
+                cleared, kept = vpnctl.store.clear_alerts(keep)
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+            return self._json(200, {"ok": True, "action": "clear-alerts",
+                                    "cleared": cleared, "kept": kept})
         if name not in vpnctl.VPN_BY_KEY:
             return self._json(400, {"error": "unknown vpn: " + str(name)})
         if action not in ("up", "down", "restart", "enable", "disable"):
@@ -984,6 +1055,58 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200 if res["ok"] else 500, res)
 
 
+def _systemctl_state():
+    try:
+        active = subprocess.run(["systemctl", "is-active", WEB_SERVICE],
+                                capture_output=True, text=True, timeout=2).stdout.strip()
+        enabled = subprocess.run(["systemctl", "is-enabled", WEB_SERVICE],
+                                 capture_output=True, text=True, timeout=2).stdout.strip()
+        return active, enabled
+    except Exception:
+        return "", ""
+
+
+def _print_bind_help(exc, host, port):
+    print(f"[x] 无法监听 {host}:{port}：{exc.strerror or exc}", file=sys.stderr)
+    if exc.errno == errno.EADDRINUSE:
+        active, enabled = _systemctl_state()
+        if active in ("active", "activating", "reloading"):
+            print("    面板已经由系统服务在后台启动，不需要再执行 python3 web.py。", file=sys.stderr)
+            print(f"    直接用浏览器打开：http://{host}:{port}/", file=sys.stderr)
+            print("    查看运行状态：systemctl status vpn-manager-web", file=sys.stderr)
+            print("    如需手动启动，先停止服务：sudo systemctl stop vpn-manager-web", file=sys.stderr)
+            return
+        print("    端口已被占用，通常说明面板已经在运行。可以这样处理：", file=sys.stderr)
+        print(f"      1) 直接打开：http://{host}:{port}/", file=sys.stderr)
+        print(f"      2) 查看占用进程：ss -ltnp 'sport = :{port}'", file=sys.stderr)
+        print("      3) 若由系统服务托管：sudo systemctl stop vpn-manager-web", file=sys.stderr)
+        print(f"      4) 或换个端口启动：python3 web.py --port {port + 1}", file=sys.stderr)
+        if enabled == "enabled":
+            print("    提示：系统服务已设为开机自启，可用 sudo systemctl restart vpn-manager-web 重新拉起。", file=sys.stderr)
+    elif exc.errno == errno.EACCES:
+        print(f"    端口 {port} 需要特权（<1024）。改用高位端口，例如：", file=sys.stderr)
+        print("      python3 web.py --port 8787", file=sys.stderr)
+    elif exc.errno == errno.EADDRNOTAVAIL:
+        print(f"    地址 {host} 不是本机地址。改用可用的监听地址，例如：", file=sys.stderr)
+        print("      python3 web.py --host 127.0.0.1", file=sys.stderr)
+    else:
+        print("    请检查监听地址/端口，或先用 ss -ltnp 查看占用情况。", file=sys.stderr)
+
+
+def _open_browser(host, port):
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    url = f"http://{'[' + host + ']' if ':' in host else host}:{port}/"
+    try:
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        print(f"  已在浏览器打开: {url}")
+    except Exception:
+        pass
+
+
 def main():
     global READ_ONLY, REQUIRE_TOKEN, TOKEN
     p = argparse.ArgumentParser(description="vpnctl 网页面板")
@@ -997,10 +1120,18 @@ def main():
                    help="不启动后台日志采集器（默认启动：连接事件落库）")
     p.add_argument("--no-watch", action="store_true",
                    help="不启动后台健康守护（默认启动：状态/证书/IP 告警）")
+    p.add_argument("--no-open", action="store_true",
+                   help="启动后不自动打开浏览器（默认在本机图形环境下自动打开）")
     args = p.parse_args()
     READ_ONLY = args.read_only
     REQUIRE_TOKEN = args.auth and not args.no_auth
     TOKEN = (args.token or load_token()) if REQUIRE_TOKEN else ""
+
+    try:
+        srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as e:
+        _print_bind_help(e, args.host, args.port)
+        return 2
 
     collector_status = "未启动"
     if not args.no_collect:
@@ -1029,9 +1160,8 @@ def main():
         except Exception as e:
             watchdog_status = f"启动失败：{e}"
 
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print("=" * 56)
-    print(f"  VPN 管控平台  http://{args.host}:{args.port}")
+    print(f"  VPN 管控平台  http://{args.host}:{args.port}/")
     print(f"  日志采集器: {collector_status}")
     print(f"  健康守护: {watchdog_status}")
     print(f"  只读模式: {'是' if READ_ONLY else '否'}   令牌校验: {'开' if REQUIRE_TOKEN else '关（打开即可用）'}")
@@ -1040,6 +1170,8 @@ def main():
         print(f"  （已保存到 {TOKEN_FILE}，在页面右上角填入后即可启停）")
     print("  远程访问建议: ssh -L %d:127.0.0.1:%d <user>@<server>" % (args.port, args.port))
     print("=" * 56)
+    if not args.no_open:
+        _open_browser(args.host, args.port)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         srv.serve_forever()
