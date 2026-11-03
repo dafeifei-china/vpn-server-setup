@@ -58,6 +58,7 @@ Not a code project, with one exception: `manager/` is a stdlib-only Python contr
 - UOS AppArmor blocks strongSwan client certs under `$HOME`: put `ca.crt`/`client*.crt`/`client*.key` in `/etc/ipsec.d/`.
 - UOS `pppd` 2.4.9 rejects `lock`/`local`/`proxyarp` (already removed from `L2TP_PLAIN` options). EasyRSA 3.1.7 rejects `EASYRSA_REQ_CN` for `build-server-full`/`build-client-full` (CN comes from filename); only `build-ca` accepts it.
 - Containers use `--restart unless-stopped`: after a manual `docker stop`, a reboot will **not** bring the VPN back until `docker start`.
+- **L2TP_PLAIN NAT persistence:** iptables rules do not survive reboot; `setup-l2tp-plain.sh` installs `/usr/local/sbin/l2tp-plain-nat.sh` + enabled `l2tp-plain-nat.service` to restore NAT/FORWARD on boot. If a client gets `192.168.44.x` but has no internet, check that service and `sudo iptables -t nat -S POSTROUTING | grep 192.168.44`; default DNS is `223.5.5.5`/`119.29.29.29` (override `DNS1`/`DNS2`).
 
 ## Verification (no test suite)
 - OpenVPN: `docker logs --tail 20 running-vpn-openvpn-tls | grep "Initialization Sequence Completed"`, `ss -ulnp | grep 1194`

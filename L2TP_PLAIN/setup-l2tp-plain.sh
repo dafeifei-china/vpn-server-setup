@@ -12,6 +12,7 @@
 #   - 使用宿主机 xl2tpd + pppd，监听 UDP 1701
 #   - 网段默认 192.168.44.0/24，与 L2TP/IPsec（192.168.42.0/24）、OpenVPN（10.99.99.0/24）均不冲突
 #   - 不改动 OpenVPN / L2TP-IPSEC 容器
+#   - NAT/转发规则写入 l2tp-plain-nat.service，服务器重启后自动恢复
 #   - 可重复运行：覆盖配置前先备份
 #
 set -euo pipefail
@@ -26,13 +27,15 @@ POOL_END="${POOL_END:-192.168.44.250}"
 SERVER_NAME="${SERVER_NAME:-l2tpserver}"
 USER_NAME="${USER_NAME:-test}"
 USER_PASS="${USER_PASS:-test}"
-DNS1="${DNS1:-8.8.8.8}"
-DNS2="${DNS2:-8.8.4.4}"
+DNS1="${DNS1:-223.5.5.5}"
+DNS2="${DNS2:-119.29.29.29}"
 SERVER_IP="${SERVER_IP:-}"
 
 XL2TPD_CONF=/etc/xl2tpd/xl2tpd.conf
 PPP_OPT=/etc/ppp/options.xl2tpd
 CHAP=/etc/ppp/chap-secrets
+NAT_SCRIPT=/usr/local/sbin/l2tp-plain-nat.sh
+NAT_UNIT=/etc/systemd/system/l2tp-plain-nat.service
 #########################################################
 
 log()  { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
@@ -102,19 +105,59 @@ else
   log "账号 $USER_NAME 已存在"
 fi
 
-# 4. 转发 + NAT + MSS
+# 4. 转发 + NAT + MSS（并持久化，重启后自动恢复）
 echo 'net.ipv4.ip_forward=1' | $SUDO tee /etc/sysctl.d/99-l2tp-plain.conf >/dev/null
 $SUDO sysctl -q -w net.ipv4.ip_forward=1
 
 add_rule() {
   local table="$1"; shift
-  $SUDO iptables -t "$table" -C "$@" 2>/dev/null || $SUDO iptables -t "$table" -A "$@"
+  $SUDO iptables -w 5 -t "$table" -C "$@" 2>/dev/null \
+    || $SUDO iptables -w 5 -t "$table" -A "$@"
 }
 add_rule nat POSTROUTING -s "$VPN_SUBNET/24" ! -d "$VPN_SUBNET/24" -j MASQUERADE
 add_rule filter FORWARD -s "$VPN_SUBNET/24" -j ACCEPT
 add_rule filter FORWARD -d "$VPN_SUBNET/24" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 add_rule filter FORWARD -s "$VPN_SUBNET/24" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 log "已配置转发/NAT"
+
+# iptables 规则不会跨重启保留：写入恢复脚本，并交给 systemd 开机执行
+log "写入开机自动恢复规则 $NAT_SCRIPT"
+$SUDO tee "$NAT_SCRIPT" >/dev/null <<NAT_SCRIPT_EOF
+#!/usr/bin/env bash
+# 由 setup-l2tp-plain.sh 生成：开机恢复裸 L2TP 的转发/NAT 规则。
+set -euo pipefail
+VPN_CIDR="$VPN_SUBNET/24"
+IPT="\$(command -v iptables || echo /usr/sbin/iptables)"
+sysctl -qw net.ipv4.ip_forward=1 || true
+add_rule() {
+  local table="\$1"; shift
+  "\$IPT" -w 5 -t "\$table" -C "\$@" 2>/dev/null || "\$IPT" -w 5 -t "\$table" -A "\$@"
+}
+add_rule nat POSTROUTING -s "\$VPN_CIDR" ! -d "\$VPN_CIDR" -j MASQUERADE
+add_rule filter FORWARD -s "\$VPN_CIDR" -j ACCEPT
+add_rule filter FORWARD -d "\$VPN_CIDR" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+add_rule filter FORWARD -s "\$VPN_CIDR" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+NAT_SCRIPT_EOF
+$SUDO chmod 0755 "$NAT_SCRIPT"
+
+$SUDO tee "$NAT_UNIT" >/dev/null <<NAT_UNIT_EOF
+[Unit]
+Description=L2TP plain (no IPsec) NAT/forwarding rules
+After=network-online.target
+Wants=network-online.target
+Before=xl2tpd.service
+
+[Service]
+Type=oneshot
+ExecStart=$NAT_SCRIPT
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+NAT_UNIT_EOF
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable --now l2tp-plain-nat.service >/dev/null 2>&1 || true
+log "已启用 l2tp-plain-nat.service（重启后自动恢复 NAT）"
 
 # 5. 启动
 $SUDO systemctl enable xl2tpd >/dev/null 2>&1 || true
@@ -156,5 +199,7 @@ cat <<EOF
    $SUDO systemctl restart xl2tpd
    $SUDO systemctl stop xl2tpd
    $SUDO journalctl -u xl2tpd -f
+   $SUDO systemctl status l2tp-plain-nat
+   $SUDO iptables -t nat -S POSTROUTING | grep 192.168.44
 ==================================================================
 EOF

@@ -21,6 +21,8 @@
 | `/etc/xl2tpd/xl2tpd.conf` | xl2tpd 主配置（网段、认证方式） |
 | `/etc/ppp/options.xl2tpd` | pppd 参数（MSCHAPv2、DNS、MTU） |
 | `/etc/ppp/chap-secrets` | 账号密码 |
+| `/usr/local/sbin/l2tp-plain-nat.sh` | 开机恢复 NAT/转发规则（脚本生成） |
+| `/etc/systemd/system/l2tp-plain-nat.service` | 调用上面的脚本，开机自动执行 |
 
 ---
 
@@ -34,11 +36,15 @@ sudo systemctl start   xl2tpd      # 启用
 sudo systemctl disable xl2tpd      # 取消开机自启
 sudo journalctl -u xl2tpd -f       # 日志
 sudo ss -ulnp | grep 1701          # 确认监听
+sudo systemctl status  l2tp-plain-nat   # NAT/转发规则（开机自启）
+sudo systemctl restart l2tp-plain-nat   # 规则丢失时手动恢复
 ```
 
 改账号：编辑 `/etc/ppp/chap-secrets`，格式 `用户名 服务名 密码 IP`（服务名固定 `l2tpserver`），然后 `sudo systemctl restart xl2tpd`。
 
 改网段：编辑脚本顶部变量后重跑 `./setup-l2tp-plain.sh`。
+
+DNS 默认下发 `223.5.5.5` / `119.29.29.29`；要改可 `DNS1=... DNS2=... ./setup-l2tp-plain.sh`。
 
 ---
 
@@ -100,12 +106,16 @@ reg add HKLM\SYSTEM\CurrentControlSet\Services\PolicyAgent /v ProhibitIpSec /t R
 | 客户端连上又被服务端断开 | 服务端 pppd 启动失败或认证失败，`journalctl -u xl2tpd -n 50` |
 | 认证失败 | `chap-secrets` 的账号/密码/服务名（`l2tpserver`）不匹配 |
 | 同一客户端两个 L2TP 连不上 | NM l2tp 插件只允许一个活动连接，先停掉另一个 |
-| 连上打不开网页 | 检查 `ip_forward`、NAT 规则、DNS |
+| 重启后能连上但打不开网页 | 旧版本重启会丢失 iptables NAT 规则；重跑 `./setup-l2tp-plain.sh`，或 `sudo systemctl restart l2tp-plain-nat` |
+| 能 ping IP 但域名打不开 | DNS 不通；默认 `223.5.5.5`/`119.29.29.29`，检查 `/etc/ppp/options.xl2tpd` 的 `ms-dns` |
+| 连上完全没网 | 检查 `ip_forward`、`l2tp-plain-nat` 服务、NAT 规则 |
 
 排障：
 
 ```bash
 sudo journalctl -u xl2tpd -n 50 --no-pager
+sudo systemctl status l2tp-plain-nat
+sudo sysctl net.ipv4.ip_forward
 sudo iptables -t nat -S POSTROUTING | grep 192.168.44
 sudo iptables -S FORWARD | grep 192.168.44
 ```
@@ -116,6 +126,10 @@ sudo iptables -S FORWARD | grep 192.168.44
 
 ```bash
 sudo systemctl disable --now xl2tpd
+# 删除开机自动恢复的 NAT 服务
+sudo systemctl disable --now l2tp-plain-nat
+sudo rm -f /etc/systemd/system/l2tp-plain-nat.service /usr/local/sbin/l2tp-plain-nat.sh
+sudo systemctl daemon-reload
 # 删除 NAT/转发规则
 sudo iptables -t nat -D POSTROUTING -s 192.168.44.0/24 ! -d 192.168.44.0/24 -j MASQUERADE
 sudo iptables -D FORWARD -s 192.168.44.0/24 -j ACCEPT
